@@ -412,6 +412,13 @@ td.ready .num {
   text-align: right;
 }
 td.mult .pz { color: var(--ink-3); font-size: 11px; }
+td.r.low { color: var(--ready); }
+
+/* The curve tab's head row: the fitted line and its record, before any single protocol. */
+tr.sumrow td { background: var(--bg-2); border-top: 1px solid var(--line-2); border-bottom: 1px solid var(--line-2); }
+tr.sumrow td.name { padding-top: 12px; padding-bottom: 12px; }
+tr.sumrow .nm { font-family: var(--mono); font-size: 12px; color: var(--value); white-space: normal; }
+tr.sumrow .cat { display: block; margin-top: 3px; }
 
 .empty {
   padding: 46px 20px;

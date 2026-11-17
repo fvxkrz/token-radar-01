@@ -13,10 +13,12 @@ import {
   LIVE_ROWS,
   SnapshotError,
   isRankable,
-  sectorBenchmarks,
-  impliedValue,
-  universeBenchmark,
+  fitCurve,
+  curveValue,
+  fitSet,
   protocolMultiple,
+  type Curve,
+  type FitRow,
   type BoardRow,
   type LiveRow,
   type RadarData,
@@ -37,9 +39,7 @@ export const EARLY_ROWS = 260;
  * never traded for a nicer-looking board. The early rows are the pre-token protocols with less TVL
  * than the watchlist floor, which the watchlist by construction cannot hold.
  */
-export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): BoardRow[] {
-  const universe = universeBenchmark(snapshot);
-  const sectors = sectorBenchmarks(snapshot, model);
+export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL, curve: Curve = fitCurve(snapshot)): BoardRow[] {
   const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
   const watchlist = new Set(snapshot.watchlist);
 
@@ -54,7 +54,7 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     .slice(0, EARLY_ROWS);
   for (const p of early) chosen.set(p.slug, p);
 
-  const scored = [...chosen.values()].map((p) => ({ p, v: impliedValue(p, snapshot.as_of, model, sectors, universe.multiple) }));
+  const scored = [...chosen.values()].map((p) => ({ p, v: curveValue(p, snapshot.as_of, curve) }));
   scored.sort((a, b) => b.v.implied - a.v.implied || (a.p.slug < b.p.slug ? -1 : a.p.slug > b.p.slug ? 1 : 0));
 
   return scored.map(({ p, v }, i) => ({
@@ -78,13 +78,13 @@ export function buildBoard(snapshot: Snapshot, model: ModelConstants = MODEL): B
     on_watchlist: watchlist.has(p.slug),
     model: {
       model_version: MODEL_VERSION,
-      growth_pct: v.growthPct,
-      growth_multiplier: round4(v.growthMult),
-      maturity_multiplier: round4(v.maturityMult),
-      sector_multiple: round4(v.benchmark.multiple),
-      sector_multiple_low: round4(v.benchmark.multiple_low),
-      sector_multiple_high: round4(v.benchmark.multiple_high),
-      sector_peers: v.benchmark.peers,
+      growth_pct: p.change_7d ?? 0,
+      growth_multiplier: 1,
+      maturity_multiplier: 1,
+      sector_multiple: round4(Math.pow(10, v.log_value) / Math.max(1, p.tvl_usd)),
+      sector_multiple_low: round4(Math.pow(10, v.log_value + curve.band_low_log) / Math.max(1, p.tvl_usd)),
+      sector_multiple_high: round4(Math.pow(10, v.log_value + curve.band_high_log) / Math.max(1, p.tvl_usd)),
+      sector_peers: curve.fit_rows,
       age_days: v.age,
     },
     farm_steps: farmSteps(p, v.age).map(stepText),
@@ -160,12 +160,33 @@ function capitalForOf(row: BoardRow): number {
   return capitalFor({ tvl_usd: row.tvl_usd } as SnapshotProtocol);
 }
 
-/** Everything the page renders, from the snapshot: the board, the live set, the sectors and the model. */
+/**
+ * The fit set priced by the fitted curve: actual against predicted, worst miss first, so the page's
+ * evidence table leads with the rows the curve gets wrong. Nothing here is on the board: these are the
+ * protocols whose token already trades, read only to fit and to check.
+ */
+export function fitRows(snapshot: Snapshot, curve: Curve): FitRow[] {
+  return fitSet(snapshot)
+    .map((p) => {
+      const v = curveValue(p, snapshot.as_of, curve);
+      return {
+        slug: p.slug,
+        name: p.name,
+        tvl_usd: Math.round(p.tvl_usd),
+        age_days: v.age ?? 0,
+        mcap_usd: Math.round(p.mcap_usd!),
+        predicted_usd: v.implied,
+        miss: round4(Math.max(v.implied, p.mcap_usd!) / Math.min(v.implied, p.mcap_usd!)),
+      };
+    })
+    .sort((a, b) => b.miss - a.miss || (a.slug < b.slug ? -1 : 1));
+}
+
+/** Everything the page renders, from the snapshot: the board, the live set, the fit's own rows, the model. */
 export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): { board: BoardRow[]; radar: RadarData } {
-  const board = buildBoard(snapshot, model);
+  const curve = fitCurve(snapshot);
+  const board = buildBoard(snapshot, model, curve);
   const live = liveRows(snapshot);
-  const universe = universeBenchmark(snapshot);
-  const sectors = sectorBenchmarks(snapshot, model);
   const watchlist = new Set(snapshot.watchlist);
   const radar: RadarData = {
     as_of: snapshot.as_of,
@@ -173,26 +194,28 @@ export function buildRadar(snapshot: Snapshot, model: ModelConstants = MODEL): {
     floor_usd: snapshot.floor_usd,
     model,
     model_version: MODEL_VERSION,
+    universe_size: snapshot.protocols.length,
     watchlist_size: snapshot.watchlist.length,
     board_size: board.length,
     early_size: board.filter((r) => !watchlist.has(r.slug)).length,
     live_size: live.length,
-    universe_multiple: round4(universe.multiple),
-    universe_peers: universe.peers,
-    min_peers: model.min_peers,
-    // Every category with at least one tokenized peer, not the top thirty: the Sectors tab says how many
-    // sectors the model priced, so it must not quietly stop counting.
-    sectors: sectors.filter((s) => s.peers > 0).map((s) => ({
-      category: s.category,
-      peers: s.peers,
-      multiple: round4(s.multiple),
-      multiple_low: round4(s.multiple_low),
-      multiple_high: round4(s.multiple_high),
-      raw_multiple: round4(s.raw_multiple),
-      weight: round4(s.weight),
-    })),
+
+    curve: {
+      intercept: round4(curve.intercept),
+      tvl_beta: round4(curve.tvl_beta),
+      age_beta: round4(curve.age_beta),
+      fit_rows: curve.fit_rows,
+      loo_miss: round4(curve.loo_miss),
+      within_3x: round4(curve.within_3x),
+      flat_miss: round4(curve.flat_miss),
+      flat_within_3x: round4(curve.flat_within_3x),
+      growth_tilt: round4(curve.growth_tilt),
+      band_low: round4(curve.band_low_log),
+      band_high: round4(curve.band_high_log),
+    },
     rows: board.map(radarRow),
     live,
+    fit: fitRows(snapshot, curve),
   };
   return { board, radar };
 }
